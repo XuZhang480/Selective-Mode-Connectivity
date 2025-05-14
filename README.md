@@ -2,6 +2,14 @@
 
 The code in this repository implements the SMC .
 
+## Getting started
+
+Let's start by installing all the dependencies.
+
+```shell
+pip3 install -r requirement.txt
+```
+
 ## Curve Finding
 
 
