@@ -1,6 +1,6 @@
 # Usage
 
-The code in this repository implements both the RMC ERMC and SRMC .
+The code in this repository implements the SMC .
 
 ## Curve Finding
 
@@ -98,10 +98,10 @@ python train_.py --dir=<DIR>  --dataset=CIFAR10 --data_path=<PATH> --model=ViT -
 
 Once you have two checkpoints to use as the endpoints you can train the curve connecting them using the following command.
 
-Note that msd attacks in the current code contain all three attacks by default. If you need to reduce the number of attack types, manually adjust line 294 in the /attack/att.py file.
+Note that msd attacks in the current code contain two attacks by default. If you need to reduce the number of attack types, manually adjust line 298 in the /attack/att.py file.
 
 ```bash
-python  train.py --dir=<DIR> \
+python  curve_train.py --dir=<DIR> \
                  --dataset=<DATASET> \
                  --data_path=<PATH> \
                  --transform=<TRANSFORM>
@@ -114,7 +114,9 @@ python  train.py --dir=<DIR> \
                  --num_bends=<N_BENDS> \
                  --init_start=<CKPT1> \ 
                  --init_end=<CKPT2> \
-                 --pgd=<PGD>
+                 --pgd=<PGD> \
+                 --R=<ROUNDS R> \
+                 --k=<RATIO k>
                  [--fix_start] \
                  [--fix_end] \
                  [--use_test]
@@ -125,21 +127,23 @@ Parameters:
 * ```CURVE``` &mdash; desired curve parametrization [Bezier|PolyChain] 
 * ```N_BENDS``` &mdash; number of bends in the curve
 * ```CKPT1, CKPT2``` &mdash; paths to the checkpoints to use as the endpoints of the curve
+* `ROUNDS R`&mdash; rounds of weight selection
+* `RATIO k`&mdash; ratio of parameters to be updated
 
 Use the flags `--fix_end --fix_start` if you want to fix the positions of the endpoints; otherwise the endpoints will be updated during training. See the section on [training the endpoints] for the description of the other parameters.
 
 For example, use the following commands to train VGG16 or PreResNet :
 ```bash
 #PreResNet
-python  train.py --dir=<DIR> --dataset=[CIFAR10/CIFAR100] --use_test --transform=ResNet --data_path=<PATH> --model=PreResNet110 --curve=[Bezier|PolyChain] --num_bends=3  --init_start=<CKPT1> --init_end=<CKPT2> --fix_start --fix_end --epochs=50 --batch_size=128  --lr=0.03 --wd=3e-4 --pgd=[1/2/inf/msd]
+python  curve_train.py --dir=<DIR> --dataset=[CIFAR10/CIFAR100] --use_test --transform=ResNet --data_path=<PATH> --model=PreResNet110 --curve=[Bezier|PolyChain] --num_bends=3  --init_start=<CKPT1> --init_end=<CKPT2> --fix_start --fix_end --epochs=50 --batch_size=128  --lr=0.03 --wd=3e-4 --pgd=[1/2/inf/msd] --R=5 --k=0.5
 
-python  train.py --dir=<DIR> --dataset=ImageNet100 --use_test --transform=ResNet --data_path=<PATH> --model=PreResNet110 --curve=[Bezier|PolyChain] --num_bends=3  --init_start=<CKPT1> --init_end=<CKPT2> --fix_start --fix_end --epochs=50 --batch_size=32  --lr=0.01 --wd=3e-4 --pgd=[1/2/inf/msd]
+python  curve_train.py --dir=<DIR> --dataset=ImageNet100 --use_test --transform=ResNet --data_path=<PATH> --model=PreResNet110 --curve=[Bezier|PolyChain] --num_bends=3  --init_start=<CKPT1> --init_end=<CKPT2> --fix_start --fix_end --epochs=50 --batch_size=32  --lr=0.01 --wd=3e-4 --pgd=[1/2/inf/msd] --R=5 --k=0.5
 
 #WideResNet
-python  train.py --dir=<DIR>  --dataset=CIFAR10 --use_test --transform=ResNet --data_path=./data --model=WideResNet28x10 --curve=Bezier --num_bends=3 --init_start=<CKPT1> --init_end=<CKPT2>--fix_start --fix_end --epochs=100 --lr=0.03 --wd=5e-4 --pgd=[1/2/inf/msd]
+python  curve_train.py --dir=<DIR>  --dataset=CIFAR10 --use_test --transform=ResNet --data_path=./data --model=WideResNet28x10 --curve=Bezier --num_bends=3 --init_start=<CKPT1> --init_end=<CKPT2>--fix_start --fix_end --epochs=100 --lr=0.03 --wd=5e-4 --pgd=[1/2/inf/msd] --R=5 --k=0.5
 
 #ViT
-python  train.py --dir=<DIR> --dataset=CIFAR10 --use_test --transform=ResNet --data_path=./data --model=ViT --curve=Bezier --num_bends=3  --init_start=<CKPT1> --init_end=<CKPT2> --fix_start --fix_end --epochs=50 --lr=0.001 --wd=3e-4 --pgd=[1/2/inf/msd]
+python  curve_train.py --dir=<DIR> --dataset=CIFAR10 --use_test --transform=ResNet --data_path=./data --model=ViT --curve=Bezier --num_bends=3  --init_start=<CKPT1> --init_end=<CKPT2> --fix_start --fix_end --epochs=50 --lr=0.001 --wd=3e-4 --pgd=[1/2/inf/msd] --R=5 --k=0.5
 ```
 
 ### Evaluating the curves
@@ -229,20 +233,3 @@ train_.py --dir=<DIR>  --dataset=CIFAR10 --data_path=<PATH> --model=WideResNet28
 #ViT
 python train_.py --dir=<DIR>  --dataset=CIFAR10 --data_path=<PATH> --model=ViT --epochs=50 --lr=0.001 --wd=1e-4 --use_test --transform=ResNet --pgd=[1/2/inf/msd]  --origin_model=<CKPT>
 ```
-
-
-
-### Citation
-
-```latex
-@article{wang2023robust,
-  title={Robust Mode Connectivity-Oriented Adversarial Defense: Enhancing Neural Network Robustness Against Diversified $$\backslash$ell\_p $ Attacks},
-  author={Wang, Ren and Li, Yuxuan and Liu, Sijia and Hero, Alfred},
-  journal={arXiv preprint arXiv:2303.10225},
-  year={2023}
-}
-```
-
-### Acknowledgement
-
-We would like to express our gratitude for the support provided by NSF grants 2246157 and 2319243, as well as the ORAU Ralph E. Powe Junior Faculty Enhancement Award. Additionally, we are thankful for the computational resources made available through ACCESS and CloudBank.

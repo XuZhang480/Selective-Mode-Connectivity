@@ -74,7 +74,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--pgd',type=str,default=0,metavar='PGD',help='type of pgd attack')
 
-    parser.add_argument('--top_k_ratio', type=float, default=0.9, metavar='Top_K', help='ratio of parameters to be updated')
+    parser.add_argument('--R', type=float, default=5, metavar='ROUNDS R', help='rounds of weight selection')
+
+    parser.add_argument('--k', type=float, default=0.5, metavar='RATIO k', help='ratio of parameters to be updated')
 
     args = parser.parse_args()
     os.makedirs(args.dir, exist_ok=True)
@@ -150,108 +152,14 @@ if __name__ == '__main__':
         return factor * base_lr
 
 
-    def select_top_k_params_by_grad(train_loader, model, criterion, regularizer=None, pgdtype='0', curveflag=False,
-                                    top_k_ratio=1.0, random_select=False):
-        grad_norms = []
-        param_list = []
-
-        model.train()
-        train_iter = iter(train_loader)
-        input, target = next(train_iter)
-        input = input.cuda()
-        target = target.cuda()
-
-        t = input.data.new(1).uniform_()
-        if pgdtype == 'inf':
-            at = pgd.PGD()
-            if curveflag:
-                input = at.generate(model, input, target, None, 0, t=t)
-            else:
-                input = at.generate(model, input, target, None, 0)
-            model.train()
-        elif pgdtype == '2':
-            at = pgd2.PGD()
-            if curveflag:
-                input = at.generate(model, input, target, None, 0, t=t)
-            else:
-                input = at.generate(model, input, target, None, 0)
-            model.train()
-        elif pgdtype == '1':
-            model.eval()
-            if curveflag:
-                input += pgd_l1_topk(model, input, target, epsilon=12, alpha=0.05, num_iter=10, device="cuda:0",
-                                     restarts=0, version=0, t=t)
-            else:
-                input+=pgd_l1_topk(model,input,target, epsilon=12, alpha=0.05, num_iter = 10, device = "cuda:0", restarts = 0, version = 0)
-            model.train()
-        elif pgdtype == 'msd':
-            if curveflag:
-                input += msd_v0(model, input, target, epsilon_l_inf=8 / 255, epsilon_l_2=1, epsilon_l_1=12,
-                                alpha_l_inf=2 / 255, alpha_l_2=0.2, alpha_l_1=0.05, num_iter=10, device="cuda:0", t=t)
-            else:
-                input += msd_v0(model, input, target, epsilon_l_inf=8 / 255, epsilon_l_2=1, epsilon_l_1=12,
-                                alpha_l_inf=2 / 255, alpha_l_2=0.2, alpha_l_1=0.05, num_iter=10, device="cuda:0")
-            model.train()
-
-        if curveflag:
-            output = model(**dict(input=input, t=float(t.item())))
-        else:
-            output = model(input)
-        loss = criterion(output, target)
-        if regularizer is not None:
-            loss += regularizer(model)
-
-        model.zero_grad()
-        loss.backward()
-
-        for param in model.parameters():
-            if param.requires_grad and param.grad is not None:
-                grad_norm = torch.norm(param.grad).item()
-                grad_norms.append(grad_norm)
-                # grad_norms.append(grad_norm/param.numel())
-                param_list.append(param)
-
-        if len(grad_norms) == 0:
-            return []
-
-        if random_select:
-            # 将参数转换为 NumPy 数组前先移动到 CPU 并分离
-            param_list_np = [param.cpu().detach().numpy() for param in param_list]
-            num_selected = int(len(param_list_np) * top_k_ratio)
-            selected_indices = np.random.choice(len(param_list_np), num_selected, replace=False)
-            selected_params = [param_list[i] for i in selected_indices]
-        else:
-            # 根据梯度范数选择参数
-            threshold = np.percentile(grad_norms, (1 - top_k_ratio) * 100)
-            selected_params = [
-                param for param, grad_norm in zip(param_list, grad_norms) if grad_norm >= threshold
-            ]
-
-        return selected_params
-
-
-    def freeze_remaining_params(model, selected_params):
-        selected_set = set(selected_params)
-        for param in model.parameters():
-            if param not in selected_set:
-                param.requires_grad = False
-
     criterion = F.cross_entropy
     regularizer = None if args.curve is None else curves.l2_regularizer(args.wd)
-
-    top_k_ratio = args.top_k_ratio
-    selected_params = select_top_k_params_by_grad(loaders['train'], model, criterion, regularizer, pgdtype=args.pgd, curveflag=curveflag, top_k_ratio=top_k_ratio, random_select=args.random_select)
-
     optimizer = torch.optim.SGD(
-        # filter(lambda param: param.requires_grad, model.parameters()),
-        filter(lambda param: param.requires_grad, selected_params),
+        filter(lambda param: param.requires_grad, model.parameters()),
         lr=args.lr,
         momentum=args.momentum,
         weight_decay=args.wd if args.curve is None else 0.0
     )
-
-    # freezing the rest parameters
-    freeze_remaining_params(model, selected_params)
 
     start_epoch = 1
     if args.resume is not None:
@@ -274,16 +182,103 @@ if __name__ == '__main__':
         optimizer_state=optimizer.state_dict()
     )
 
+    weight_selection_rounds = [i * (args.epochs // args.R) + 1 for i in range(args.R)]
+
+    import torch
+    import numpy as np
+
+
+    def DPU(train_loader, model, criterion, optimizer, regularizer=None, pgdtype='0', curveflag=False, k=0.5, random_select=False):
+        grad_scores = []
+        param_list = []
+
+        model.train()
+        train_iter = iter(train_loader)
+        input, target = next(train_iter)
+        input = input.cuda()
+        target = target.cuda()
+
+        t = input.data.new(1).uniform_()
+
+        if pgdtype == 'inf':
+            at = pgd.PGD()
+            if curveflag:
+                input = at.generate(model, input, target, None, 0, t=t)
+            else:
+                input = at.generate(model, input, target, None, 0)
+            model.train()
+        if pgdtype == '2':
+            at = pgd2.PGD()
+            if curveflag:
+                input = at.generate(model, input, target, None, 0, t=t)
+            else:
+                input = at.generate(model, input, target, None, 0)
+            model.train()
+        if pgdtype == '1':
+            model.eval()
+            if curveflag:
+                input += pgd_l1_topk(model, input, target, epsilon=12, alpha=0.05, num_iter=10, device="cuda:0",
+                                     restarts=0, version=0, t=t)
+            else:
+                input, acc_tr, _, _ = apgd_train(model, input, target, norm='L1', eps=12, n_iter=10)
+            model.train()
+        if pgdtype == 'msd':
+            if curveflag:
+                input += msd_v0(model, input, target, epsilon_l_inf=2 / 255, epsilon_l_2=1, epsilon_l_1=12,
+                                alpha_l_inf=2 / 255, alpha_l_2=0.2, alpha_l_1=0.05, num_iter=10, device="cuda:0", t=t)
+            else:
+                input += msd_v0(model, input, target, epsilon_l_inf=8 / 255, epsilon_l_2=1, epsilon_l_1=12,
+                                alpha_l_inf=2 / 255, alpha_l_2=0.2, alpha_l_1=0.05, num_iter=10, device="cuda:0")
+            model.train()
+
+        output = model(**dict(input=input, t=float(t.item()))) if curveflag else model(input)
+        loss = criterion(output, target)
+        if regularizer is not None:
+            loss += regularizer(model)
+
+        model.zero_grad()
+        loss.backward()
+
+        for param in model.parameters():
+            if param.requires_grad and param.grad is not None:
+                grad_score = param.grad.pow(2).sum().item()
+                grad_scores.append(grad_score)
+                param_list.append(param)
+
+        if len(grad_scores) == 0:
+            return optimizer
+
+        if random_select:
+            num_selected = int(len(param_list) * k)
+            selected_indices = np.random.choice(len(param_list), num_selected, replace=False)
+            selected_params = [param_list[i] for i in selected_indices]
+        else:
+            threshold = np.percentile(grad_scores, (1 - k) * 100)
+            selected_params = [param for param, score in zip(param_list, grad_scores) if score >= threshold]
+
+        selected_param_set = set(selected_params)
+        for param in model.parameters():
+            param.requires_grad = param in selected_param_set
+
+        optimizer_defaults = optimizer.defaults
+        optimizer_cls = type(optimizer)
+
+        new_optimizer = optimizer_cls(selected_params, **optimizer_defaults)
+
+        return new_optimizer
+
     has_bn = utils.check_bn(model)
     test_res = {'loss': None, 'accuracy': None, 'nll': None}
     for epoch in range(start_epoch, args.epochs + 1):
         time_ep = time.time()
 
+        if epoch in weight_selection_rounds:
+            optimizer = DPU(loaders['train'], model, criterion, optimizer, regularizer, pgdtype=args.pgd, curveflag=curveflag, k=args.k)
+
         lr = learning_rate_schedule(args.lr, epoch, args.epochs)
         utils.adjust_learning_rate(optimizer, lr)
 
-        train_res = utils.train(loaders['train'], model, optimizer, criterion, regularizer, pgdtype=args.pgd,
-                                curveflag=curveflag)
+        train_res = utils.train(loaders['train'], model, optimizer, criterion, regularizer, pgdtype=args.pgd, curveflag=curveflag)
         test_res = utils.test(loaders['test'], model, criterion, regularizer, pgdtype=args.pgd, curveflag=curveflag)
         # if args.curve is None or not has_bn:
         #     test_res = utils.test(loaders['test'], model, criterion, regularizer, pgdtype=args.pgd,curveflag=curveflag)
